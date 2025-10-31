@@ -47,6 +47,15 @@ epg_sources = [
 playlist_url = "https://raw.githubusercontent.com/Drewski2423/DrewLive/refs/heads/main/MergedPlaylist.m3u8"
 output_filename = "DrewLive.xml.gz"
 
+
+def fix_xml_issues(xml_content):
+    """Fix common XML encoding and formatting issues for player compatibility"""
+    xml_content = xml_content.replace('&amp;amp;', '&amp;')
+    xml_content = re.sub(r'</programme>\s*<programme', '</programme>\n<programme', xml_content)
+    xml_content = re.sub(r'[^\x20-\x7E\n\r\t]', '', xml_content)
+    return xml_content
+
+
 def fetch_tvg_ids_from_playlist(url):
     try:
         r = requests.get(url, timeout=30)
@@ -57,6 +66,7 @@ def fetch_tvg_ids_from_playlist(url):
     except Exception as e:
         print(f"❌ Failed to fetch tvg-ids from playlist: {e}")
         return set()
+
 
 def fetch_with_retry(url, retries=3, delay=10, timeout=30):
     for attempt in range(1, retries + 1):
@@ -70,21 +80,23 @@ def fetch_with_retry(url, retries=3, delay=10, timeout=30):
                 time.sleep(delay)
     return None
 
-def stream_parse_epg(file_obj, valid_tvg_ids, root):
+
+def stream_parse_epg(xml_content, valid_tvg_ids, root):
     kept_channels = 0
     total_items = 0
     try:
-        tree = ET.parse(file_obj)
+        tree = ET.ElementTree(ET.fromstring(xml_content))
         for child in tree.getroot():
-            if child.tag == 'channel' or child.tag == 'programme':
+            if child.tag in ('channel', 'programme'):
                 total_items += 1
                 tvg_id = child.get('id') or child.get('channel')
                 if tvg_id in valid_tvg_ids:
                     root.append(child)
                     kept_channels += 1
     except ET.ParseError:
-        print("❌ XML Parse Error")
+        print("❌ XML Parse Error — skipping source")
     return total_items, kept_channels
+
 
 def merge_and_filter_epg(epg_sources, playlist_url, output_file):
     valid_tvg_ids = fetch_tvg_ids_from_playlist(playlist_url)
@@ -98,10 +110,23 @@ def merge_and_filter_epg(epg_sources, playlist_url, output_file):
         if not resp:
             print(f"❌ Failed to fetch {url}")
             continue
+
         content = resp.content
         if url.endswith(".gz"):
-            content = gzip.decompress(content)
-        total, kept = stream_parse_epg(BytesIO(content), valid_tvg_ids, root)
+            try:
+                content = gzip.decompress(content)
+            except Exception:
+                print("⚠️ Failed to decompress, skipping")
+                continue
+
+        # Decode, fix XML, and re-encode for parsing
+        try:
+            xml_content = fix_xml_issues(content.decode("utf-8", errors="ignore"))
+        except Exception:
+            print("⚠️ Failed to decode XML, skipping")
+            continue
+
+        total, kept = stream_parse_epg(xml_content, valid_tvg_ids, root)
         cumulative_total += total
         cumulative_kept += kept
         print(f"📊 Total items found: {total}, Kept: {kept}")
@@ -112,6 +137,7 @@ def merge_and_filter_epg(epg_sources, playlist_url, output_file):
     print(f"\n✅ Filtered EPG saved to: {output_file}")
     print(f"📈 Cumulative items processed: {cumulative_total}")
     print(f"📈 Total items kept: {cumulative_kept}")
+
 
 if __name__ == "__main__":
     merge_and_filter_epg(epg_sources, playlist_url, output_filename)
